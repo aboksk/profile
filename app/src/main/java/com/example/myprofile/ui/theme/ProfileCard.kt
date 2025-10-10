@@ -11,11 +11,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.myprofile.R
+import kotlinx.coroutines.launch
 
 @Composable
-fun ProfileCard() {
+fun ProfileCard(snackbarHost: SnackbarHostState) {
     var followers by  remember { mutableStateOf(776) }
     var isFollowing by remember { mutableStateOf(false) }
+    var showUnfollowDialog by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     Card(
         modifier = Modifier
@@ -67,10 +70,46 @@ fun ProfileCard() {
 
             // Кнопка Follow
             Button(onClick = {
-                if (isFollowing) followers-- else followers++
-                isFollowing = !isFollowing }) {
-                Text(if (isFollowing) "Following" else "Follow")
+                if (isFollowing) {
+                    // 👇 показываем диалог
+                    showUnfollowDialog = true
+                } else {
+                    followers++
+                    isFollowing = true
+                    scope.launch {
+                        snackbarHost.showSnackbar("You followed Abdurrakhman!")
+                    }
+                }
+            }) {
+                Text(if (isFollowing) "Unfollow" else "Follow")
             }
+
+            if (showUnfollowDialog) {
+                AlertDialog(
+                    onDismissRequest = { showUnfollowDialog = false },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            followers--
+                            isFollowing = false
+                            showUnfollowDialog = false
+                            scope.launch {
+                                snackbarHost.showSnackbar("You unfollowed Abdurrakhman.")
+                            }
+                        }) {
+                            Text("Yes")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showUnfollowDialog = false }) {
+                            Text("Cancel")
+                        }
+                    },
+                    text = { Text("Are you sure you want to unfollow?") }
+                )
+            }
+
+
+
             Text("Followers: $followers")
         }
     }
