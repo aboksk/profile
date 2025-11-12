@@ -1,5 +1,6 @@
 package com.example.myprofile
 
+import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -15,22 +16,108 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
-
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.room.*
 import com.example.myprofile.ui.theme.MyProfileTheme
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
+import retrofit2.http.GET
 
+// ----------------------------
+// 🧩 Data Model
+// ----------------------------
+@Entity(tableName = "user_profiles")
+data class UserProfile(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val name: String,
+    val username: String,
+    val email: String
+)
+
+// ----------------------------
+// 🧩 DAO
+// ----------------------------
+@Dao
+interface UserDao {
+    @Query("SELECT * FROM user_profiles")
+    fun getAll(): Flow<List<UserProfile>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(users: List<UserProfile>)
+
+    @Query("DELETE FROM user_profiles")
+    suspend fun clearAll()
+}
+
+// ----------------------------
+// 🧩 Database
+// ----------------------------
+@Database(entities = [UserProfile::class], version = 1)
+abstract class AppDatabase : RoomDatabase() {
+    abstract fun userDao(): UserDao
+
+    companion object {
+        @Volatile private var INSTANCE: AppDatabase? = null
+
+        fun getInstance(context: Context): AppDatabase {
+            return INSTANCE ?: synchronized(this) {
+                Room.databaseBuilder(
+                    context.applicationContext,
+                    AppDatabase::class.java,
+                    "user_db"
+                ).build().also { INSTANCE = it }
+            }
+        }
+    }
+}
+
+// ----------------------------
+// 🌐 Retrofit API
+// ----------------------------
+interface UserApi {
+    @GET("users")
+    suspend fun getUsers(): List<UserProfile>
+}
+
+object ApiClient {
+    val api: UserApi by lazy {
+        Retrofit.Builder()
+            .baseUrl("https://jsonplaceholder.typicode.com/")
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+            .create(UserApi::class.java)
+    }
+}
+
+// ----------------------------
+// 🧠 Repository
+// ----------------------------
+class UserRepository(private val dao: UserDao, private val api: UserApi) {
+
+    fun getAllProfiles() = dao.getAll()
+
+    suspend fun refreshProfiles() {
+        val remote = api.getUsers()
+        dao.clearAll()
+        dao.insertAll(remote)
+    }
+}
+
+// ----------------------------
+// 🧠 ViewModels
+// ----------------------------
 data class ProfileUiState(
     val name: String = "Abdurrakhman Tolegen",
     val bio: String = "Future Web Developer 💻",
@@ -55,6 +142,24 @@ class ProfileViewModel : ViewModel() {
     }
 }
 
+class FollowersViewModel(private val repo: UserRepository) : ViewModel() {
+
+    val users = repo.getAllProfiles().stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(),
+        emptyList()
+    )
+
+    fun refresh() {
+        viewModelScope.launch {
+            repo.refreshProfiles()
+        }
+    }
+}
+
+// ----------------------------
+// 🎨 UI
+// ----------------------------
 @OptIn(ExperimentalMaterial3Api::class)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -102,6 +207,9 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// ----------------------------
+// 📇 Profile Screen
+// ----------------------------
 @Composable
 fun ProfileCard(
     snackbarHost: SnackbarHostState,
@@ -166,6 +274,9 @@ fun ProfileCard(
     }
 }
 
+// ----------------------------
+// ✏️ Edit Screen
+// ----------------------------
 @Composable
 fun EditProfileScreen(
     onBack: () -> Unit,
@@ -202,73 +313,40 @@ fun EditProfileScreen(
     }
 }
 
+// ----------------------------
+// 👥 Followers Screen (Room + Retrofit)
+// ----------------------------
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FollowersScreen() {
-    val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val db = remember { AppDatabase.getInstance(context) }
+    val repo = remember { UserRepository(db.userDao(), ApiClient.api) }
+    val vm = remember { FollowersViewModel(repo) }
+    val users by vm.users.collectAsState()
 
-    val stories = listOf("Aruzhan", "Dias", "Abok", "Madi", "Sanzhar", "Aliya")
-    var followers by remember {
-        mutableStateOf(
-            stories.map { Follower(it) }
-        )
-    }
-
-    Scaffold(snackbarHost = { SnackbarHost(snackbarHostState) }) { padding ->
-        Surface(
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Followers") },
+                actions = {
+                    Button(onClick = { vm.refresh() }) {
+                        Text("Refresh")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .padding(16.dp)
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp)
-            ) {
-                Text("Followers", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(12.dp))
-
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    items(followers, key = { it.name }) { follower ->
-                        var isFollowing by remember { mutableStateOf(follower.isFollowing) }
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(8.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(follower.name, fontSize = 18.sp)
-
-                            Button(onClick = { isFollowing = !isFollowing }) {
-                                Text(if (isFollowing) "Following" else "Follow")
-                            }
-
-                            Button(
-                                onClick = {
-                                    val removed = follower
-                                    followers = followers - removed
-                                    scope.launch {
-                                        val result = snackbarHostState.showSnackbar(
-                                            message = "${removed.name} removed",
-                                            actionLabel = "Undo"
-                                        )
-                                        if (result == SnackbarResult.ActionPerformed) {
-                                            followers = followers + removed
-                                        }
-                                    }
-                                }
-                            ) {
-                                Text("❌")
-                            }
-                        }
-                    }
-                }
+            items(users) { user ->
+                Text("${user.name} (${user.email})", fontSize = 18.sp)
+                Divider()
             }
         }
     }
 }
-
-data class Follower(val name: String, val isFollowing: Boolean = false)
