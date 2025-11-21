@@ -1,5 +1,7 @@
+// MainActivityWithHilt.kt
 package com.example.myprofile
 
+import android.app.Application
 import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -21,6 +23,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -29,11 +32,22 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.room.*
 import com.example.myprofile.ui.theme.MyProfileTheme
+import dagger.Module
+import dagger.Provides
+import dagger.hilt.InstallIn
+import dagger.hilt.android.HiltAndroidApp
+import dagger.hilt.android.AndroidEntryPoint
+import dagger.hilt.android.components.ViewModelComponent
+import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
+import javax.inject.Inject
+import javax.inject.Singleton
 
 // ----------------------------
 // 🧩 Data Model
@@ -67,20 +81,6 @@ interface UserDao {
 @Database(entities = [UserProfile::class], version = 1)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun userDao(): UserDao
-
-    companion object {
-        @Volatile private var INSTANCE: AppDatabase? = null
-
-        fun getInstance(context: Context): AppDatabase {
-            return INSTANCE ?: synchronized(this) {
-                Room.databaseBuilder(
-                    context.applicationContext,
-                    AppDatabase::class.java,
-                    "user_db"
-                ).build().also { INSTANCE = it }
-            }
-        }
-    }
 }
 
 // ----------------------------
@@ -92,6 +92,7 @@ interface UserApi {
 }
 
 object ApiClient {
+    // kept for backward compatibility; Hilt will provide Retrofit and Api via modules
     val api: UserApi by lazy {
         Retrofit.Builder()
             .baseUrl("https://jsonplaceholder.typicode.com/")
@@ -104,7 +105,7 @@ object ApiClient {
 // ----------------------------
 // 🧠 Repository
 // ----------------------------
-class UserRepository(private val dao: UserDao, private val api: UserApi) {
+class UserRepository @Inject constructor(private val dao: UserDao, private val api: UserApi) {
 
     fun getAllProfiles() = dao.getAll()
 
@@ -125,7 +126,8 @@ data class ProfileUiState(
     val isFollowing: Boolean = false
 )
 
-class ProfileViewModel : ViewModel() {
+@HiltViewModel
+class ProfileViewModel @Inject constructor() : ViewModel() {
     private val _uiState = MutableStateFlow(ProfileUiState())
     val uiState = _uiState.asStateFlow()
 
@@ -142,9 +144,11 @@ class ProfileViewModel : ViewModel() {
     }
 }
 
-class FollowersViewModel(private val repo: UserRepository) : ViewModel() {
+@HiltViewModel
+class FollowersViewModel @Inject constructor(private val repo: UserRepository) : ViewModel() {
 
-    val users = repo.getAllProfiles().stateIn(
+    // Convert DAO Flow to StateFlow so UI can subscribe
+    val users: StateFlow<List<UserProfile>> = repo.getAllProfiles().stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(),
         emptyList()
@@ -152,7 +156,50 @@ class FollowersViewModel(private val repo: UserRepository) : ViewModel() {
 
     fun refresh() {
         viewModelScope.launch {
-            repo.refreshProfiles()
+            try {
+                repo.refreshProfiles()
+            } catch (e: Exception) {
+                // handle error (log or propagate)
+            }
+        }
+    }
+}
+
+// ----------------------------
+// ✨ Feeds (Practice Task addition)
+// ----------------------------
+data class Post(
+    val id: Int,
+    val title: String,
+    val content: String,
+    val comments: Int = 0,
+    val likes: Int = 0
+)
+
+@HiltViewModel
+class FeedsViewModel @Inject constructor() : ViewModel() {
+    private val _posts = MutableStateFlow(
+        listOf(
+            Post(1, "Welcome!", "This is your first post", comments = 2, likes = 5),
+            Post(2, "Compose + Hilt", "Hilt makes DI easy in Compose", comments = 3, likes = 10),
+            Post(3, "Retrofit + Room", "Sync your offline data", comments = 1, likes = 2)
+        )
+    )
+    val posts = _posts.asStateFlow()
+
+    fun toggleLike(postId: Int) {
+        _posts.update { list ->
+            list.map {
+                if (it.id == postId) it.copy(likes = it.likes + 1) else it
+            }
+        }
+    }
+
+    fun addComment(postId: Int) {
+        _posts.update { list ->
+            list.map {
+                if (it.id == postId) it.copy(comments = it.comments + 1) else it
+            }
         }
     }
 }
@@ -160,7 +207,10 @@ class FollowersViewModel(private val repo: UserRepository) : ViewModel() {
 // ----------------------------
 // 🎨 UI
 // ----------------------------
-@OptIn(ExperimentalMaterial3Api::class)
+@HiltAndroidApp
+class MyApplication : Application()
+
+@AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -191,7 +241,8 @@ class MainActivity : ComponentActivity() {
                             ProfileCard(
                                 snackbarHost = remember { SnackbarHostState() },
                                 onEditClick = { navController.navigate("edit") },
-                                onFollowersClick = { navController.navigate("followers") }
+                                onFollowersClick = { navController.navigate("followers") },
+                                onFeedsClick = { navController.navigate("feeds") }
                             )
                         }
                         composable("edit") {
@@ -199,6 +250,9 @@ class MainActivity : ComponentActivity() {
                         }
                         composable("followers") {
                             FollowersScreen()
+                        }
+                        composable("feeds") {
+                            FeedsScreen()
                         }
                     }
                 }
@@ -215,7 +269,8 @@ fun ProfileCard(
     snackbarHost: SnackbarHostState,
     onEditClick: () -> Unit,
     onFollowersClick: () -> Unit,
-    vm: ProfileViewModel = viewModel()
+    onFeedsClick: () -> Unit,
+    vm: ProfileViewModel = hiltViewModel()
 ) {
     val state by vm.uiState.collectAsState()
     val scope = rememberCoroutineScope()
@@ -234,6 +289,7 @@ fun ProfileCard(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.padding(16.dp)
         ) {
+            // Use placeholder resource - keep same as original
             Image(
                 painter = painterResource(R.drawable.pic),
                 contentDescription = "Avatar",
@@ -251,6 +307,7 @@ fun ProfileCard(
                 onClick = {
                     if (state.isFollowing) vm.unfollow() else vm.follow()
                     scope.launch {
+                        // show Snackbar based on *new* state, so check inverted
                         snackbarHost.showSnackbar(
                             if (state.isFollowing) "Unfollowed!" else "Followed!"
                         )
@@ -269,6 +326,8 @@ fun ProfileCard(
                 Button(onClick = onEditClick) { Text("Edit Profile") }
                 Spacer(Modifier.width(8.dp))
                 Button(onClick = onFollowersClick) { Text("Followers") }
+                Spacer(Modifier.width(8.dp))
+                Button(onClick = onFeedsClick) { Text("Feeds") }
             }
         }
     }
@@ -280,7 +339,7 @@ fun ProfileCard(
 @Composable
 fun EditProfileScreen(
     onBack: () -> Unit,
-    vm: ProfileViewModel = viewModel()
+    vm: ProfileViewModel = hiltViewModel()
 ) {
     val state by vm.uiState.collectAsState()
     var name by remember { mutableStateOf(state.name) }
@@ -314,17 +373,14 @@ fun EditProfileScreen(
 }
 
 // ----------------------------
-// 👥 Followers Screen (Room + Retrofit)
+// 👥 Followers Screen (Room + Retrofit via Hilt)
 // ----------------------------
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FollowersScreen() {
-    val context = LocalContext.current
-    val db = remember { AppDatabase.getInstance(context) }
-    val repo = remember { UserRepository(db.userDao(), ApiClient.api) }
-    val vm = remember { FollowersViewModel(repo) }
+fun FollowersScreen(
+    vm: FollowersViewModel = hiltViewModel()
+) {
     val users by vm.users.collectAsState()
-
     Scaffold(
         topBar = {
             TopAppBar(
@@ -350,3 +406,70 @@ fun FollowersScreen() {
         }
     }
 }
+
+// ----------------------------
+// 📰 Feeds Screen
+// ----------------------------
+@Composable
+fun FeedsScreen(vm: FeedsViewModel = hiltViewModel()) {
+    val posts by vm.posts.collectAsState()
+    Scaffold(topBar = { TopAppBar(title = { Text("Feeds") }) }) { padding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(16.dp)
+        ) {
+            items(posts) { post ->
+                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), elevation = CardDefaults.cardElevation(4.dp)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(post.title, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                        Spacer(Modifier.height(6.dp))
+                        Text(post.content)
+                        Spacer(Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Button(onClick = { vm.toggleLike(post.id) }) { Text("Like (${post.likes})") }
+                            Spacer(Modifier.width(8.dp))
+                            Button(onClick = { vm.addComment(post.id) }) { Text("Comment (${post.comments})") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ----------------------------
+// 🔩 Hilt Modules (Network + Database)
+// ----------------------------
+@Module
+@InstallIn(SingletonComponent::class)
+object NetworkModule {
+
+    @Provides
+    @Singleton
+    fun provideRetrofit(): Retrofit =
+        Retrofit.Builder()
+            .baseUrl("https://jsonplaceholder.typicode.com/")
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+
+    @Provides
+    @Singleton
+    fun provideUserApi(retrofit: Retrofit): UserApi =
+        retrofit.create(UserApi::class.java)
+}
+
+@Module
+@InstallIn(SingletonComponent::class)
+object DatabaseModule {
+
+    @Provides
+    @Singleton
+    fun provideDatabase(@ApplicationContext context: Context): AppDatabase =
+        Room.databaseBuilder(context, AppDatabase::class.java, "user_db").build()
+
+    @Provides
+    fun provideUserDao(db: AppDatabase): UserDao = db.userDao()
+}
+
